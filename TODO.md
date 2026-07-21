@@ -7,11 +7,14 @@
   Rekomendasi: **Jalur B** — migrasi ke API keys baru (`sb_secret_...`) di
   Supabase dashboard (Settings > API), lalu rotate secret key-nya. Dengan jalur ini
   anon/publishable key tidak berubah dan frontend tidak perlu di-build ulang.
-  Setelah rotate: update `SUPABASE_SERVICE_ROLE_KEY` di `backend/.env` + env vars
-  hosting backend (Railway/Render), lalu restart backend. `JWT_SECRET` TIDAK perlu
-  diganti (milik FastAPI sendiri, bukan JWT secret Supabase). Cek dulu versi
-  `supabase-py` menerima key `sb_secret_`; kalau tidak, pakai rotasi legacy JWT
-  secret — tapi itu mengubah anon key juga (lihat checklist di percakapan/dok).
+  Setelah rotate: update `SUPABASE_SERVICE_ROLE_KEY` + `SUPABASE_ANON_KEY` di
+  (1) `backend/.env` lokal dan (2) env vars project Vercel **berlaris-api** →
+  lalu Redeploy. `JWT_SECRET` TIDAK perlu diganti (milik FastAPI sendiri, bukan
+  JWT secret Supabase). supabase-py sudah 2.31.0 — support `sb_secret_`.
+
+- [ ] **Redeploy backend `berlaris-api`** setelah env `ENVIRONMENT=production`
+  diperbaiki (per 2026-07-21 malam `/docs` masih terbuka karena deploy terakhir
+  belum memakai env baru).
 
 - [ ] **Kalau project di-git-init**: masukkan `backend/.env`, `frontend/.env`,
   dan `.env.test` ke `.gitignore` SEBELUM commit pertama.
@@ -31,3 +34,14 @@ dan `waste_logs` (keduanya dulu di-subscribe StockLevels.jsx).
 
 Rollback RLS (emergency): `berlaris_migration_rls_rollback.sql`.
 Laporan lengkap: `RLS_PREFLIGHT_2026-07-21.md`.
+
+## Deployment (live sejak 2026-07-21)
+
+- Repo: `github.com/dioariaa/berlaris-inventory` (PRIVATE) — push ke `main` = auto-deploy.
+- Frontend: **https://berlaris.vercel.app** (Vercel project `berlaris`, root `frontend`,
+  env `VITE_API_BASE_URL=https://berlaris-api.vercel.app`).
+- Backend: **https://berlaris-api.vercel.app** (Vercel project `berlaris-api`, root
+  `backend`, Python serverless via `api/index.py` + `vercel.json`; 6 env vars).
+- CORS default backend = `https://berlaris.vercel.app`; override via env `ALLOWED_ORIGINS`
+  (comma-separated) tanpa ubah kode.
+- render.yaml tersisa sebagai alternatif (Render butuh kartu — batal dipakai).
