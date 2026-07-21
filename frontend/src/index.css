@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Berlaris warm cream theme — from Inventory FnB.dc.html */
+    --background:         38 37% 91%;   /* #f1ebe1 warm cream */
+    --foreground:         23 22% 14%;   /* #2a211b dark brown  */
+    --card:               0 0% 100%;    /* #ffffff white */
+    --card-foreground:    23 22% 14%;   /* #2a211b */
+    --primary:            27 53% 28%;   /* #6f4422 coffee brown */
+    --primary-foreground: 0 0% 100%;
+    --secondary:          39 52% 96%;   /* #faf6ef light cream */
+    --secondary-foreground: 23 22% 14%;
+    --muted:              39 52% 96%;   /* #faf6ef */
+    --muted-foreground:   32 11% 49%;   /* #8a7d6e warm gray */
+    --accent:             39 52% 96%;
+    --accent-foreground:  23 22% 14%;
+    --destructive:        10 58% 42%;   /* #a8412c red-brown */
+    --destructive-foreground: 0 0% 100%;
+    --border:             37 35% 88%;   /* #ece4d7 */
+    --input:              37 35% 88%;
+    --ring:               27 53% 28%;   /* #6f4422 */
+    --radius:             0.875rem;     /* 14px — matches card border-radius in design */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Hanken Grotesk', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4 {
+    font-family: 'Schibsted Grotesk', system-ui, sans-serif;
+  }
+}
+
+/* Material Symbols Rounded helper class */
+.msr {
+  font-family: 'Material Symbols Rounded';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+/* Warm scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: rgba(120,95,65,.26);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120,95,65,.44);
+  background-clip: padding-box;
+}

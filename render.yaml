@@ -1,0 +1,23 @@
+# Render Blueprint — deploy via dashboard: New → Blueprint → pilih repo ini.
+# 4 env var secret (sync: false) diisi manual di dashboard saat create
+# (copy nilai dari backend/.env — pakai key BARU hasil rotate).
+services:
+  - type: web
+    name: berlaris-api
+    runtime: docker
+    rootDir: backend
+    plan: free
+    healthCheckPath: /docs
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: VARIANCE_THRESHOLD
+        value: "5.0"
+      - key: ENVIRONMENT
+        value: production

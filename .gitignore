@@ -1,0 +1,22 @@
+# ── Secrets — JANGAN PERNAH di-commit ─────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ── Node / build ──────────────────────────────────────────────
+node_modules/
+frontend/dist/
+
+# ── Backup & artefak lokal ────────────────────────────────────
+berlaris_backup_pre_reset/
+.claude-plugin.zip
+.claude/settings.local.json
+
+# ── OS ────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
