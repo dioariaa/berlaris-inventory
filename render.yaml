@@ -7,7 +7,7 @@ services:
     runtime: docker
     rootDir: backend
     plan: free
-    healthCheckPath: /docs
+    healthCheckPath: /
     envVars:
       - key: SUPABASE_URL
         sync: false

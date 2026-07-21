@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 
 from fastapi import FastAPI, Request
@@ -14,7 +15,13 @@ app = FastAPI(
     docs_url="/docs" if settings.environment == "development" else None,
 )
 
-ALLOWED_ORIGINS      = ["https://berlaris.vercel.app"]
+# Bisa dioverride tanpa deploy ulang kode: env ALLOWED_ORIGINS berisi daftar
+# origin dipisah koma, mis. "https://berlaris.vercel.app,https://berlaris-xyz.vercel.app"
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "https://berlaris.vercel.app").split(",")
+    if o.strip()
+]
 ALLOWED_ORIGIN_REGEX = r"http://localhost:\d+" if settings.environment == "development" else None
 
 app.add_middleware(
