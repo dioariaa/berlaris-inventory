@@ -22,6 +22,13 @@
 - Opsional: `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` di `frontend/.env`
   sudah tidak dipakai (frontend 100% via FastAPI sejak 2026-07-21) — boleh dihapus.
 
+## Tech debt / perbaikan umum
+
+- [ ] Handler global untuk translate 422 Pydantic validation error ke pesan
+  Indonesia — saat ini toast frontend akan menampilkan "[object Object]" untuk
+  error validator array. Ditemukan saat kerja multi-input production
+  (2026-07-21), scope-nya lebih luas dari fitur ini.
+
 ## Catatan arsitektur — Realtime & Opsi B
 
 Opsi B (RLS policy untuk authenticated Realtime) belum applicable karena frontend

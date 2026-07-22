@@ -139,7 +139,7 @@ def get_current_stock(ingredient_ids: list[str] | None = None, client: Client | 
     batch_rows = (
         client.table("production_batches")
         .select(
-            "raw_qty_used, raw_unit_id, portions_actual,"
+            "id, raw_qty_used, raw_unit_id, portions_actual,"
             " process:production_processes!process_id("
             "   raw_ingredient_id, output_ingredient_id, portion_size_g)"
         )
@@ -147,32 +147,68 @@ def get_current_stock(ingredient_ids: list[str] | None = None, client: Client | 
         .data
     ) or []
 
-    # Konversi raw_unit_id batch → base unit raw ingredient
+    # Input aktual multi-bahan; batch tanpa baris di sini = legacy single-raw
+    try:
+        bi_rows = (
+            client.table("batch_inputs")
+            .select("batch_id, ingredient_id, qty_used, unit_id")
+            .execute()
+            .data
+        ) or []
+    except Exception:
+        bi_rows = []  # tabel belum ada (migration belum dijalankan)
+    inputs_by_batch: dict[str, list] = defaultdict(list)
+    for r in bi_rows:
+        inputs_by_batch[r["batch_id"]].append(r)
+
+    # Konversi unit input → base unit ingredient (legacy raw & batch_inputs)
     unit_pairs: set[tuple[str, str]] = set()
     for b in batch_rows:
-        proc = b.get("process") or {}
-        raw_meta = ing_meta.get(proc.get("raw_ingredient_id")) or {}
-        base = raw_meta.get("base_unit_id")
-        if base and b["raw_unit_id"] != base:
-            unit_pairs.add((b["raw_unit_id"], base))
+        inputs = inputs_by_batch.get(b["id"])
+        if inputs:
+            for inp in inputs:
+                base = (ing_meta.get(inp["ingredient_id"]) or {}).get("base_unit_id")
+                if base and inp["unit_id"] != base:
+                    unit_pairs.add((inp["unit_id"], base))
+        else:
+            proc = b.get("process") or {}
+            raw_meta = ing_meta.get(proc.get("raw_ingredient_id")) or {}
+            base = raw_meta.get("base_unit_id")
+            if base and b.get("raw_unit_id") and b["raw_unit_id"] != base:
+                unit_pairs.add((b["raw_unit_id"], base))
     conv_cache = _build_conversion_cache(client, unit_pairs)
 
     prod_out: dict[str, float] = {}       # processed ingredient inflow
-    prod_raw_used: dict[str, float] = {}  # raw ingredient outflow via production
+    prod_raw_used: dict[str, float] = {}  # ingredient outflow via production
 
     for b in batch_rows:
         proc    = b.get("process") or {}
-        raw_iid = proc.get("raw_ingredient_id")
         out_iid = proc.get("output_ingredient_id")
         out_meta = ing_meta.get(out_iid) or {}
         # Produksi terjadi di division output-nya (bar/kitchen)
         prod_loc = _division_location(out_meta.get("division"))
 
-        if raw_iid and raw_iid in ids_set:
-            raw_base = (ing_meta.get(raw_iid) or {}).get("base_unit_id")
-            qty = _convert(float(b["raw_qty_used"]), b["raw_unit_id"], raw_base, conv_cache)
-            prod_raw_used[raw_iid] = prod_raw_used.get(raw_iid, 0.0) + qty
-            loc_flow[raw_iid][prod_loc] -= qty
+        inputs = inputs_by_batch.get(b["id"])
+        if not inputs and b.get("raw_qty_used") is None:
+            continue  # batch yatim/setengah-jadi (insert inputs gagal): abaikan TOTAL
+
+        if inputs:
+            # Jalur multi-input: potong tiap bahan sesuai qty aktual batch
+            for inp in inputs:
+                iid = inp["ingredient_id"]
+                if iid in ids_set:
+                    base = (ing_meta.get(iid) or {}).get("base_unit_id")
+                    qty = _convert(float(inp["qty_used"]), inp["unit_id"], base, conv_cache)
+                    prod_raw_used[iid] = prod_raw_used.get(iid, 0.0) + qty
+                    loc_flow[iid][prod_loc] -= qty
+        else:
+            # Jalur legacy single-raw
+            raw_iid = proc.get("raw_ingredient_id")
+            if raw_iid and raw_iid in ids_set:
+                raw_base = (ing_meta.get(raw_iid) or {}).get("base_unit_id")
+                qty = _convert(float(b["raw_qty_used"]), b["raw_unit_id"], raw_base, conv_cache)
+                prod_raw_used[raw_iid] = prod_raw_used.get(raw_iid, 0.0) + qty
+                loc_flow[raw_iid][prod_loc] -= qty
 
         if out_iid and out_iid in ids_set:
             portions = float(b["portions_actual"])

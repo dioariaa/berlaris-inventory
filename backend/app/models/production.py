@@ -81,11 +81,51 @@ class OutputResponse(OutputBase):
     created_at: datetime
 
 
+# ── Inputs (multi-bahan: bumbu/sambal) ────────────────────────────
+
+class ProcessInputItem(BaseModel):
+    """Komposisi standar 1 batch (production_inputs)."""
+    ingredient_id: str
+    qty_per_batch: Decimal
+    unit_id: str
+    notes: Optional[str] = None
+
+    @field_validator("qty_per_batch")
+    @classmethod
+    def qty_positive(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("qty_per_batch harus > 0")
+        return v
+
+
+class ProcessInputResponse(ProcessInputItem):
+    id: str
+    process_id: str
+    ingredient_name: Optional[str] = None
+    unit_symbol: Optional[str] = None
+
+
+class BatchInputItem(BaseModel):
+    """Qty aktual satu bahan dalam 1 batch (batch_inputs)."""
+    ingredient_id: str
+    qty_used: Decimal
+    unit_id: str
+
+    @field_validator("qty_used")
+    @classmethod
+    def qty_positive(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("qty_used harus > 0")
+        return v
+
+
 # ── Process ───────────────────────────────────────────────────────
 
 class ProcessBase(BaseModel):
     name: str
-    raw_ingredient_id: str
+    # Nullable sejak multi-input (2026-07-21): proses bumbu pakai `inputs`,
+    # bukan single raw. Validasi "raw ATAU inputs" di router (pesan Indonesia).
+    raw_ingredient_id: Optional[str] = None
     output_ingredient_id: str
     portion_size_g: Optional[Decimal] = None
     is_active: bool = True
@@ -95,6 +135,7 @@ class ProcessBase(BaseModel):
 class ProcessCreate(ProcessBase):
     stages: list[StageCreate] = []
     outputs: list[OutputCreate] = []
+    inputs: list[ProcessInputItem] = []
 
     @model_validator(mode="after")
     def stages_ordered(self) -> "ProcessCreate":
@@ -119,6 +160,7 @@ class ProcessResponse(ProcessBase):
     output_ingredient_name: Optional[str] = None
     stages: list[StageResponse] = []
     outputs: list[OutputResponse] = []
+    inputs: list[ProcessInputResponse] = []
     created_at: datetime
     updated_at: datetime
 
@@ -138,16 +180,20 @@ class YieldResult(BaseModel):
 class BatchCreate(BaseModel):
     process_id:     str
     batch_date:     date
-    raw_qty_used:   Decimal
-    raw_unit_id:    str
+    # Legacy single-raw: keduanya diisi. Multi-input: keduanya None, `inputs` diisi.
+    # XOR di-enforce di router (HTTPException, pesan Indonesia — bukan validator
+    # Pydantic yang menghasilkan detail array & rusak di toast frontend).
+    raw_qty_used:   Optional[Decimal] = None
+    raw_unit_id:    Optional[str] = None
+    inputs:         Optional[list[BatchInputItem]] = None
     portions_actual: int
     processed_by:   Optional[str] = None
     notes:          Optional[str] = None
 
     @field_validator("raw_qty_used")
     @classmethod
-    def raw_qty_positive(cls, v: Decimal) -> Decimal:
-        if v <= 0:
+    def raw_qty_positive(cls, v: Optional[Decimal]) -> Optional[Decimal]:
+        if v is not None and v <= 0:
             raise ValueError("raw_qty_used harus > 0")
         return v
 
@@ -166,9 +212,10 @@ class BatchResponse(BaseModel):
     raw_ingredient_name:  Optional[str] = None
     output_ingredient_name: Optional[str] = None
     batch_date:           date
-    raw_qty_used:         Decimal
-    raw_unit_id:          str
+    raw_qty_used:         Optional[Decimal] = None
+    raw_unit_id:          Optional[str] = None
     raw_unit_name:        Optional[str] = None
+    inputs:               list[dict] = []
     portions_actual:      int
     portions_theoretical: Optional[Decimal] = None
     yield_actual_pct:     Optional[Decimal] = None

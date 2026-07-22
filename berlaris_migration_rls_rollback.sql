@@ -53,6 +53,12 @@ ALTER TABLE public.recipe_change_log       DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stock_transfers         DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stock_adjustments       DISABLE ROW LEVEL SECURITY;
 
+-- Multi-input production (berlaris_migration_production_inputs.sql, 2026-07-21)
+-- Baris ini error "relation does not exist" jika migration itu belum pernah
+-- dijalankan — komentari saja kalau begitu.
+ALTER TABLE public.production_inputs       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.batch_inputs            DISABLE ROW LEVEL SECURITY;
+
 -- ────────────────────────────────────────────────────────────
 -- Bersihkan policy Opsi B (Realtime) JIKA sempat dibuat.
 -- DROP POLICY IF EXISTS aman dijalankan walau policy tidak pernah ada.

@@ -22,15 +22,20 @@ router = APIRouter()
 SELECT_PROCESS = "*, raw:ingredients!raw_ingredient_id(name), output:ingredients!output_ingredient_id(name)"
 SELECT_STAGE = "id, process_id, stage_order, stage_name, yield_pct, notes, created_at"
 SELECT_OUTPUT = "id, process_id, output_ingredient_id, output_qty_per_batch, unit_id, cost_allocation_pct, notes, created_at, ingredient:ingredients!output_ingredient_id(name), unit:units!unit_id(name)"
+SELECT_INPUT = (
+    "id, process_id, ingredient_id, qty_per_batch, unit_id, notes, created_at,"
+    " ingredient:ingredients!ingredient_id(name), unit:units!unit_id(symbol)"
+)
 
 
-def _flatten_process(r: dict, stages: list, outputs: list) -> dict:
+def _flatten_process(r: dict, stages: list, outputs: list, inputs: list) -> dict:
     raw = r.pop("raw", None) or {}
     out = r.pop("output", None) or {}
     r["raw_ingredient_name"] = raw.get("name")
     r["output_ingredient_name"] = out.get("name")
     r["stages"] = stages
     r["outputs"] = outputs
+    r["inputs"] = inputs
     return r
 
 
@@ -42,7 +47,15 @@ def _flatten_output(r: dict) -> dict:
     return r
 
 
-def _load_nested(client, process_id: str) -> tuple[list, list]:
+def _flatten_input(r: dict) -> dict:
+    ing = r.pop("ingredient", None) or {}
+    unit = r.pop("unit", None) or {}
+    r["ingredient_name"] = ing.get("name")
+    r["unit_symbol"] = unit.get("symbol")
+    return r
+
+
+def _load_nested(client, process_id: str) -> tuple[list, list, list]:
     stages = (
         client.table("production_stages")
         .select(SELECT_STAGE)
@@ -59,7 +72,18 @@ def _load_nested(client, process_id: str) -> tuple[list, list]:
         .data
     )
     outputs = [_flatten_output(r) for r in raw_outputs]
-    return stages, outputs
+    try:
+        raw_inputs = (
+            client.table("production_inputs")
+            .select(SELECT_INPUT)
+            .eq("process_id", process_id)
+            .execute()
+            .data
+        ) or []
+    except Exception:
+        raw_inputs = []  # tabel belum ada (migration belum dijalankan)
+    inputs = [_flatten_input(r) for r in raw_inputs]
+    return stages, outputs, inputs
 
 
 # ─────────────────────────────────────────────
@@ -80,8 +104,8 @@ def list_processes(
 
     result = []
     for r in rows:
-        stages, outputs = _load_nested(client, r["id"])
-        result.append(_flatten_process(r, stages, outputs))
+        stages, outputs, inputs = _load_nested(client, r["id"])
+        result.append(_flatten_process(r, stages, outputs, inputs))
     return result
 
 
@@ -97,23 +121,44 @@ def get_process(process_id: str, user=Depends(get_current_user)):
     )
     if not r.data:
         raise HTTPException(status_code=404, detail="Production process tidak ditemukan")
-    stages, outputs = _load_nested(client, process_id)
-    return _flatten_process(r.data, stages, outputs)
+    stages, outputs, inputs = _load_nested(client, process_id)
+    return _flatten_process(r.data, stages, outputs, inputs)
 
 
 @router.post("/processes", response_model=ProcessResponse, status_code=status.HTTP_201_CREATED)
 def create_process(body: ProcessCreate, user=Depends(require_admin)):
     client = get_supabase_admin()
 
-    # Validasi ingredient IDs
-    for field, val in [("raw_ingredient_id", body.raw_ingredient_id), ("output_ingredient_id", body.output_ingredient_id)]:
+    # Multi-input (bumbu/sambal) ATAU legacy single-raw — minimal salah satu
+    if not body.raw_ingredient_id and not body.inputs:
+        raise HTTPException(
+            status_code=422,
+            detail="Proses harus punya bahan: isi raw_ingredient_id (bahan tunggal) "
+                   "ATAU daftar 'inputs' (multi-bahan, mis. bumbu).",
+        )
+
+    # Validasi ingredient IDs (output wajib; raw & inputs sesuai yang diisi)
+    check_ids = [("output_ingredient_id", body.output_ingredient_id)]
+    if body.raw_ingredient_id:
+        check_ids.append(("raw_ingredient_id", body.raw_ingredient_id))
+    check_ids += [
+        (f"inputs[{i}].ingredient_id", inp.ingredient_id)
+        for i, inp in enumerate(body.inputs)
+    ]
+    for field, val in check_ids:
         r = client.table("ingredients").select("id").eq("id", val).maybe_single().execute()
         if not r.data:
             raise HTTPException(status_code=422, detail=f"{field} '{val}' tidak ditemukan")
 
-    process_data = body.model_dump(exclude={"stages", "outputs"}, mode="json")
+    process_data = body.model_dump(exclude={"stages", "outputs", "inputs"}, mode="json")
     result = client.table("production_processes").insert(process_data).execute()
     process_id = result.data[0]["id"]
+
+    if body.inputs:
+        client.table("production_inputs").insert([
+            {**i.model_dump(mode="json"), "process_id": process_id}
+            for i in body.inputs
+        ]).execute()
 
     if body.stages:
         stage_records = [
@@ -135,8 +180,8 @@ def create_process(body: ProcessCreate, user=Depends(require_admin)):
         client.table("production_outputs").insert(output_records).execute()
 
     r = client.table("production_processes").select(SELECT_PROCESS).eq("id", process_id).single().execute()
-    stages, outputs = _load_nested(client, process_id)
-    return _flatten_process(r.data, stages, outputs)
+    stages, outputs, inputs = _load_nested(client, process_id)
+    return _flatten_process(r.data, stages, outputs, inputs)
 
 
 @router.put("/processes/{process_id}", response_model=ProcessResponse)
@@ -153,8 +198,8 @@ def update_process(process_id: str, body: ProcessUpdate, user=Depends(require_ad
     client.table("production_processes").update(data).eq("id", process_id).execute()
 
     r = client.table("production_processes").select(SELECT_PROCESS).eq("id", process_id).single().execute()
-    stages, outputs = _load_nested(client, process_id)
-    return _flatten_process(r.data, stages, outputs)
+    stages, outputs, inputs = _load_nested(client, process_id)
+    return _flatten_process(r.data, stages, outputs, inputs)
 
 
 @router.delete("/processes/{process_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -374,19 +419,104 @@ def _convert_raw_to_kg(raw_qty: float, raw_unit_id: str, client) -> float:
     return raw_qty
 
 
+def _load_batch_inputs(client, batch_id: str) -> list[dict]:
+    """Input aktual satu batch untuk response — [] jika tabel belum ada."""
+    try:
+        rows = (
+            client.table("batch_inputs")
+            .select(
+                "ingredient_id, qty_used, unit_id,"
+                " ingredient:ingredients!ingredient_id(name), unit:units!unit_id(symbol)"
+            )
+            .eq("batch_id", batch_id)
+            .execute()
+            .data
+        ) or []
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        ing  = r.pop("ingredient", None) or {}
+        unit = r.pop("unit", None) or {}
+        r["ingredient_name"] = ing.get("name")
+        r["unit_symbol"]     = unit.get("symbol")
+        out.append(r)
+    return out
+
+
+def _multi_input_theoretical(process_id, actual_inputs, std_rows, ing_map, cache, client):
+    """
+    Theoretical output batch multi-input:
+      scale       = Σ(qty aktual dlm base unit) ÷ Σ(qty standar dlm base unit)
+                    — hanya bahan yang match production_inputs; bahan ekstra
+                    tetap dipotong stok tapi tidak masuk skala
+      theoretical = scale × production_outputs.output_qty_per_batch
+
+    CATATAN: stages TIDAK dikalikan lagi — output_qty_per_batch sudah angka
+    ekspektasi hasil akhir (menghindari diskon yield ganda).
+    Return None jika standar/output belum dikonfigurasi (perilaku sama dengan
+    portion_size_g belum diset di jalur single-raw).
+    """
+    std_by_ing = {s["ingredient_id"]: s for s in std_rows}
+
+    tot_std = tot_act = 0.0
+    for inp in actual_inputs:
+        s = std_by_ing.get(inp.ingredient_id)
+        if not s:
+            continue
+        base = (ing_map.get(inp.ingredient_id) or {}).get("base_unit_id")
+        f_act = cache.get((inp.unit_id, base), 1.0) if inp.unit_id != base else 1.0
+        f_std = cache.get((s["unit_id"], base), 1.0) if s["unit_id"] != base else 1.0
+        tot_act += float(inp.qty_used) * f_act
+        tot_std += float(s["qty_per_batch"]) * f_std
+    if tot_std <= 0:
+        return None
+
+    out_rows = (
+        client.table("production_outputs")
+        .select("output_qty_per_batch")
+        .eq("process_id", process_id)
+        .limit(1)
+        .execute()
+        .data
+    ) or []
+    expected = float((out_rows[0].get("output_qty_per_batch") if out_rows else 0) or 0)
+    if expected <= 0:
+        logger.warning(
+            "Batch multi-input process %s: output_qty_per_batch belum diset, "
+            "theoretical tidak dikalkulasi", process_id,
+        )
+        return None
+    return round((tot_act / tot_std) * expected, 2)
+
+
 @router.post("/batches", response_model=BatchResponse, status_code=status.HTTP_201_CREATED)
 def create_batch(body: BatchCreate, user=Depends(require_admin)):
     """
     Log batch produksi dan hitung yield vs theoretical secara otomatis.
 
-    Kalkulasi:
-      raw_qty_kg           = raw_qty_used dikonversi ke kg (via unit_conversions)
-      portions_theoretical = get_theoretical_portions(process_id, raw_qty_kg)
-      yield_actual_pct     = portions_actual / portions_theoretical × 100
-      variance_pct         = (portions_actual − portions_theoretical) / portions_theoretical × 100
-      is_flagged           = |variance_pct| > VARIANCE_THRESHOLD (default 5%)
+    Dua mode — tepat SATU yang diisi:
+      - Single-raw (legacy): raw_qty_used + raw_unit_id
+      - Multi-input (bumbu): daftar `inputs` — komponen aktual dipotong dari
+        stok, theoretical = (Σ aktual ÷ Σ standar production_inputs) ×
+        output_qty_per_batch
+
+    yield_actual_pct = portions_actual / portions_theoretical × 100
+    variance_pct     = (actual − theoretical) / theoretical × 100
+    is_flagged       = |variance_pct| > VARIANCE_THRESHOLD (default 5%)
     """
     client = get_supabase_admin()
+
+    # XOR: tepat satu mode. Divalidasi di sini (bukan Pydantic) supaya pesan
+    # ke frontend berupa string Indonesia, bukan array 422 default.
+    has_legacy = body.raw_qty_used is not None and body.raw_unit_id is not None
+    has_inputs = bool(body.inputs)
+    if has_legacy == has_inputs:
+        raise HTTPException(
+            status_code=422,
+            detail="Isi salah satu: bahan tunggal (raw_qty_used + raw_unit_id) "
+                   "ATAU daftar 'inputs' untuk proses multi-bahan — tidak boleh keduanya.",
+        )
 
     # Validasi process exists dan aktif
     proc_row = (
@@ -402,52 +532,122 @@ def create_batch(body: BatchCreate, user=Depends(require_admin)):
     if not proc_row.get("is_active", True):
         raise HTTPException(status_code=422, detail="Production process sudah nonaktif")
 
-    # Validasi raw_unit_id
-    unit_row = (
-        client.table("units")
-        .select("id")
-        .eq("id", body.raw_unit_id)
-        .maybe_single()
-        .execute()
-        .data
-    )
-    if not unit_row:
-        raise HTTPException(status_code=422, detail=f"raw_unit_id '{body.raw_unit_id}' tidak ditemukan")
-
-    # Guard stok negatif: raw material harus cukup di lokasi division tempat
-    # produksi (division output ingredient), SEBELUM batch diinsert.
-    from app.services.stock_guard import assert_sufficient_stock
+    from app.services.stock_guard import assert_sufficient_stock, assert_sufficient_stock_many
     from app.services.stock_level import _division_location
     from app.services.consumption import _build_conversion_cache
 
-    ing_rows = (
-        client.table("ingredients")
-        .select("id, base_unit_id, division")
-        .in_("id", [proc_row["raw_ingredient_id"], proc_row["output_ingredient_id"]])
-        .execute()
-        .data
-    ) or []
-    ing_map = {r["id"]: r for r in ing_rows}
-    raw_base  = (ing_map.get(proc_row["raw_ingredient_id"]) or {}).get("base_unit_id")
-    prod_loc  = _division_location((ing_map.get(proc_row["output_ingredient_id"]) or {}).get("division"))
+    if has_inputs:
+        # ── Jalur MULTI-INPUT (bumbu/sambal) ─────────────────────────────────
+        try:
+            std_rows = (
+                client.table("production_inputs")
+                .select("ingredient_id, qty_per_batch, unit_id")
+                .eq("process_id", body.process_id)
+                .execute()
+                .data
+            ) or []
+        except Exception:
+            raise HTTPException(
+                status_code=500,
+                detail="Tabel production_inputs belum ada — jalankan migration "
+                       "berlaris_migration_production_inputs.sql dulu.",
+            )
 
-    raw_qty_base = float(body.raw_qty_used)
-    if raw_base and body.raw_unit_id != raw_base:
-        cache = _build_conversion_cache(client, {(body.raw_unit_id, raw_base)})
-        factor = cache.get((body.raw_unit_id, raw_base))
-        if factor is not None:
-            raw_qty_base *= factor
+        actual_ids = [i.ingredient_id for i in body.inputs]
+        all_ids = list({
+            *actual_ids,
+            *(s["ingredient_id"] for s in std_rows),
+            proc_row["output_ingredient_id"],
+        })
+        ing_rows = (
+            client.table("ingredients")
+            .select("id, base_unit_id, division")
+            .in_("id", all_ids)
+            .execute()
+            .data
+        ) or []
+        ing_map = {r["id"]: r for r in ing_rows}
+        missing = [i for i in actual_ids if i not in ing_map]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Ingredient tidak ditemukan: {', '.join(missing)}",
+            )
 
-    assert_sufficient_stock(proc_row["raw_ingredient_id"], prod_loc, raw_qty_base, client)
+        prod_loc = _division_location(
+            (ing_map.get(proc_row["output_ingredient_id"]) or {}).get("division")
+        )
 
-    # Konversi raw_qty ke kg untuk kalkulasi yield
-    raw_qty_kg = _convert_raw_to_kg(float(body.raw_qty_used), body.raw_unit_id, client)
+        pairs: set[tuple[str, str]] = set()
+        for i in body.inputs:
+            base = ing_map[i.ingredient_id]["base_unit_id"]
+            if i.unit_id != base:
+                pairs.add((i.unit_id, base))
+        for s in std_rows:
+            base = (ing_map.get(s["ingredient_id"]) or {}).get("base_unit_id")
+            if base and s["unit_id"] != base:
+                pairs.add((s["unit_id"], base))
+        cache = _build_conversion_cache(client, pairs)
 
-    # Hitung theoretical portions
-    yield_data           = get_theoretical_portions(body.process_id, raw_qty_kg, client)
-    portions_theoretical = yield_data.get("theoretical_portions")  # None jika portion_size_g belum diset
+        # Guard stok: SEMUA input harus cukup di division produksi, sebelum insert
+        needs = []
+        for i in body.inputs:
+            base = ing_map[i.ingredient_id]["base_unit_id"]
+            qty = float(i.qty_used)
+            if i.unit_id != base:
+                qty *= cache.get((i.unit_id, base), 1.0)
+            needs.append((i.ingredient_id, prod_loc, qty))
+        assert_sufficient_stock_many(needs, client)
 
-    # Kalkulasi yield & variance
+        portions_theoretical = _multi_input_theoretical(
+            body.process_id, body.inputs, std_rows, ing_map, cache, client
+        )
+        raw_qty_val, raw_unit_val = None, None
+    else:
+        # ── Jalur LEGACY single-raw ──────────────────────────────────────────
+        if not proc_row.get("raw_ingredient_id"):
+            raise HTTPException(
+                status_code=422,
+                detail="Proses ini multi-input — kirim daftar 'inputs', bukan raw_qty_used.",
+            )
+
+        unit_row = (
+            client.table("units")
+            .select("id")
+            .eq("id", body.raw_unit_id)
+            .maybe_single()
+            .execute()
+            .data
+        )
+        if not unit_row:
+            raise HTTPException(status_code=422, detail=f"raw_unit_id '{body.raw_unit_id}' tidak ditemukan")
+
+        ing_rows = (
+            client.table("ingredients")
+            .select("id, base_unit_id, division")
+            .in_("id", [proc_row["raw_ingredient_id"], proc_row["output_ingredient_id"]])
+            .execute()
+            .data
+        ) or []
+        ing_map = {r["id"]: r for r in ing_rows}
+        raw_base  = (ing_map.get(proc_row["raw_ingredient_id"]) or {}).get("base_unit_id")
+        prod_loc  = _division_location((ing_map.get(proc_row["output_ingredient_id"]) or {}).get("division"))
+
+        raw_qty_base = float(body.raw_qty_used)
+        if raw_base and body.raw_unit_id != raw_base:
+            cache = _build_conversion_cache(client, {(body.raw_unit_id, raw_base)})
+            factor = cache.get((body.raw_unit_id, raw_base))
+            if factor is not None:
+                raw_qty_base *= factor
+
+        assert_sufficient_stock(proc_row["raw_ingredient_id"], prod_loc, raw_qty_base, client)
+
+        raw_qty_kg = _convert_raw_to_kg(float(body.raw_qty_used), body.raw_unit_id, client)
+        yield_data           = get_theoretical_portions(body.process_id, raw_qty_kg, client)
+        portions_theoretical = yield_data.get("theoretical_portions")  # None jika portion_size_g belum diset
+        raw_qty_val, raw_unit_val = float(body.raw_qty_used), body.raw_unit_id
+
+    # Kalkulasi yield & variance (blok sama untuk kedua jalur)
     if portions_theoretical and portions_theoretical > 0:
         yield_actual_pct = round(body.portions_actual / portions_theoretical * 100, 2)
         variance_pct     = round(
@@ -455,11 +655,10 @@ def create_batch(body: BatchCreate, user=Depends(require_admin)):
         )
         is_flagged = abs(variance_pct) > settings.variance_threshold
     else:
-        # portion_size_g belum dikonfigurasi → tidak bisa kalkulasi, tidak di-flag
         yield_actual_pct = None
         variance_pct     = None
         is_flagged       = False
-        if not proc_row.get("portion_size_g"):
+        if not has_inputs and not proc_row.get("portion_size_g"):
             logger.warning(
                 "Batch untuk process %s: portion_size_g belum diset, yield tidak dikalkulasi",
                 body.process_id,
@@ -468,8 +667,8 @@ def create_batch(body: BatchCreate, user=Depends(require_admin)):
     record = {
         "process_id":          body.process_id,
         "batch_date":          body.batch_date.isoformat(),
-        "raw_qty_used":        float(body.raw_qty_used),
-        "raw_unit_id":         body.raw_unit_id,
+        "raw_qty_used":        raw_qty_val,
+        "raw_unit_id":         raw_unit_val,
         "portions_actual":     body.portions_actual,
         "portions_theoretical": portions_theoretical,
         "yield_actual_pct":    yield_actual_pct,
@@ -488,6 +687,27 @@ def create_batch(body: BatchCreate, user=Depends(require_admin)):
     )
     batch_id = inserted["id"]
 
+    if has_inputs:
+        # Kompensasi manual (PostgREST tanpa transaksi lintas request): kalau
+        # insert inputs gagal, hapus batch-nya. Kalau delete ini pun gagal,
+        # batch yatim di-skip TOTAL oleh stock_level/variance (guard baca).
+        try:
+            client.table("batch_inputs").insert([
+                {
+                    "batch_id":      batch_id,
+                    "ingredient_id": i.ingredient_id,
+                    "qty_used":      float(i.qty_used),
+                    "unit_id":       i.unit_id,
+                }
+                for i in body.inputs
+            ]).execute()
+        except Exception:
+            client.table("production_batches").delete().eq("id", batch_id).execute()
+            raise HTTPException(
+                status_code=500,
+                detail="Gagal menyimpan input batch — batch dibatalkan, tidak ada perubahan stok.",
+            )
+
     # Fetch kembali dengan join untuk response lengkap
     row = (
         client.table("production_batches")
@@ -497,7 +717,9 @@ def create_batch(body: BatchCreate, user=Depends(require_admin)):
         .execute()
         .data
     )
-    return _flatten_batch(row)
+    flat = _flatten_batch(row)
+    flat["inputs"] = _load_batch_inputs(client, batch_id)
+    return flat
 
 
 @router.get("/batches", response_model=list[BatchResponse])
@@ -544,4 +766,6 @@ def get_batch(batch_id: str, user=Depends(get_current_user)):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Batch tidak ditemukan")
-    return _flatten_batch(row)
+    flat = _flatten_batch(row)
+    flat["inputs"] = _load_batch_inputs(client, batch_id)
+    return flat

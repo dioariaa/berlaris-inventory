@@ -83,7 +83,7 @@ def calculate_variance(report_date: date, client: Client) -> list[dict]:
     batch_rows = (
         client.table("production_batches")
         .select(
-            "raw_qty_used, raw_unit_id, portions_actual,"
+            "id, raw_qty_used, raw_unit_id, portions_actual,"
             " process:production_processes!process_id("
             "   raw_ingredient_id, output_ingredient_id, portion_size_g)"
         )
@@ -91,6 +91,22 @@ def calculate_variance(report_date: date, client: Client) -> list[dict]:
         .execute()
         .data
     ) or []
+
+    # Input aktual multi-bahan; batch tanpa baris di sini = legacy single-raw
+    inputs_by_batch: dict[str, list] = defaultdict(list)
+    if batch_rows:
+        try:
+            bi_rows = (
+                client.table("batch_inputs")
+                .select("batch_id, ingredient_id, qty_used, unit_id")
+                .in_("batch_id", [b["id"] for b in batch_rows])
+                .execute()
+                .data
+            ) or []
+        except Exception:
+            bi_rows = []  # tabel belum ada (migration belum dijalankan)
+        for r in bi_rows:
+            inputs_by_batch[r["batch_id"]].append(r)
 
     if batch_rows:
         ing_ids_set = set(ing_ids)
@@ -100,6 +116,7 @@ def calculate_variance(report_date: date, client: Client) -> list[dict]:
             for iid in [
                 (b.get("process") or {}).get("raw_ingredient_id"),
                 (b.get("process") or {}).get("output_ingredient_id"),
+                *(inp["ingredient_id"] for inp in inputs_by_batch.get(b["id"], [])),
             ]
             if iid
         }
@@ -121,20 +138,41 @@ def calculate_variance(report_date: date, client: Client) -> list[dict]:
 
         unit_pairs: set[tuple[str, str]] = set()
         for b in batch_rows:
-            base = base_unit_map.get((b.get("process") or {}).get("raw_ingredient_id"))
-            if base and b["raw_unit_id"] != base:
-                unit_pairs.add((b["raw_unit_id"], base))
+            inputs = inputs_by_batch.get(b["id"])
+            if inputs:
+                for inp in inputs:
+                    base = base_unit_map.get(inp["ingredient_id"])
+                    if base and inp["unit_id"] != base:
+                        unit_pairs.add((inp["unit_id"], base))
+            else:
+                base = base_unit_map.get((b.get("process") or {}).get("raw_ingredient_id"))
+                if base and b.get("raw_unit_id") and b["raw_unit_id"] != base:
+                    unit_pairs.add((b["raw_unit_id"], base))
         conv_cache = _build_conversion_cache(client, unit_pairs)
 
         for b in batch_rows:
             proc    = b.get("process") or {}
-            raw_iid = proc.get("raw_ingredient_id")
             out_iid = proc.get("output_ingredient_id")
 
-            if raw_iid in ing_ids_set:
-                raw_base = base_unit_map.get(raw_iid)
-                qty = _convert(float(b["raw_qty_used"]), b["raw_unit_id"], raw_base, conv_cache)
-                production_map[raw_iid] -= qty
+            inputs = inputs_by_batch.get(b["id"])
+            if not inputs and b.get("raw_qty_used") is None:
+                continue  # batch yatim/setengah-jadi (insert inputs gagal): abaikan TOTAL
+
+            if inputs:
+                # Jalur multi-input: tiap bahan sesuai qty aktual batch
+                for inp in inputs:
+                    iid = inp["ingredient_id"]
+                    if iid in ing_ids_set:
+                        base = base_unit_map.get(iid)
+                        qty = _convert(float(inp["qty_used"]), inp["unit_id"], base, conv_cache)
+                        production_map[iid] -= qty
+            else:
+                # Jalur legacy single-raw
+                raw_iid = proc.get("raw_ingredient_id")
+                if raw_iid in ing_ids_set:
+                    raw_base = base_unit_map.get(raw_iid)
+                    qty = _convert(float(b["raw_qty_used"]), b["raw_unit_id"], raw_base, conv_cache)
+                    production_map[raw_iid] -= qty
 
             if out_iid in ing_ids_set:
                 portions     = float(b["portions_actual"])
