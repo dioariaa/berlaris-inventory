@@ -3,6 +3,7 @@ import os
 import re
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
@@ -32,6 +33,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Handle 422 Unprocessable Entity (Pydantic validation errors).
+    Translate to Indonesian and flatten message list to prevent [object Object] in frontend.
+    """
+    errors = exc.errors()
+    msg_list = []
+    for err in errors:
+        loc_parts = [str(l) for l in err.get("loc", []) if l != "body"]
+        loc = " -> ".join(loc_parts)
+        msg = err.get("msg", "")
+        msg_list.append(f"{loc}: {msg}" if loc else msg)
+    
+    detail_msg = "Data input tidak valid: " + "; ".join(msg_list) if msg_list else "Data input tidak valid."
+    
+    origin = request.headers.get("origin", "")
+    allowed = origin in ALLOWED_ORIGINS or (
+        ALLOWED_ORIGIN_REGEX and re.fullmatch(ALLOWED_ORIGIN_REGEX, origin)
+    )
+    headers = (
+        {"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true"}
+        if allowed else {}
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": detail_msg, "errors": errors},
+        headers=headers,
+    )
 
 
 @app.exception_handler(Exception)

@@ -24,7 +24,7 @@
 
 ## Tech debt / perbaikan umum
 
-- [ ] Handler global untuk translate 422 Pydantic validation error ke pesan
+- [x] Handler global untuk translate 422 Pydantic validation error ke pesan
   Indonesia — saat ini toast frontend akan menampilkan "[object Object]" untuk
   error validator array. Ditemukan saat kerja multi-input production
   (2026-07-21), scope-nya lebih luas dari fitur ini.
